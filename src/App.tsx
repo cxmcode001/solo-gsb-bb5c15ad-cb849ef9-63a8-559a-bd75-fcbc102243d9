@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { PersistState, Rule, Sample } from './types';
+import type { Analysis, PersistState, Rule, Sample, SampleMode } from './types';
 import { analyze } from './lib/engine';
+import { analyzeJson, jsonAnalysisToAnalysis } from './lib/json';
 import {
   defaultState,
   exportJson,
@@ -17,6 +18,16 @@ import { CoveragePanel } from './components/CoveragePanel';
 type Tab = 'diff' | 'explain' | 'coverage';
 
 const RULE_COLORS = ['#2563eb', '#059669', '#d97706', '#dc2626', '#7c3aed', '#0891b2'];
+
+/** 空分析结果：JSON 模式下传给纯文本视图的占位（这些视图只读 json 分支） */
+const EMPTY_ANALYSIS: Analysis = {
+  hits: [],
+  segments: [],
+  output: '',
+  errors: [],
+  coverage: [],
+  stats: { total: 0, adopted: 0, rejected: 0 },
+};
 
 export default function App() {
   const [state, setState] = useState<PersistState>(() => loadState());
@@ -45,13 +56,34 @@ export default function App() {
     state.samples.find((s) => s.id === state.currentSampleId) ?? state.samples[0];
 
   const text = sample?.text ?? '';
-  const analysis = useMemo(() => analyze(text, state.rules), [text, state.rules]);
+  const mode: SampleMode = sample?.mode === 'json' ? 'json' : 'text';
+
+  const textAnalysis = useMemo(
+    () => (mode === 'text' ? analyze(text, state.rules) : null),
+    [mode, text, state.rules],
+  );
+  const jsonAnalysis = useMemo(
+    () => (mode === 'json' ? analyzeJson(text, state.rules) : null),
+    [mode, text, state.rules],
+  );
+
+  // 规则面板只关心按规则维度的命中数与错误，两种模式共用一个形状
+  const rulePanelAnalysis = useMemo(
+    () =>
+      mode === 'json' && jsonAnalysis
+        ? jsonAnalysisToAnalysis(jsonAnalysis)
+        : (textAnalysis ?? EMPTY_ANALYSIS),
+    [mode, jsonAnalysis, textAnalysis],
+  );
+
+  // 传给各结果视图的“当前分析”（json 模式下部分字段不用）
+  const analysis = textAnalysis ?? EMPTY_ANALYSIS;
 
   // 文本或规则变化后，原有选中项可能失效
   useEffect(() => {
     setActiveKey(null);
     setHoveredKey(null);
-  }, [state.currentSampleId, text, state.rules]);
+  }, [state.currentSampleId, text, state.rules, mode]);
 
   /* ------------------------------ 规则操作 ------------------------------ */
 
@@ -101,10 +133,23 @@ export default function App() {
   };
 
   const addSample = () => {
-    const s: Sample = { id: uid('sample'), name: `样例 ${state.samples.length + 1}`, text: '' };
+    const s: Sample = {
+      id: uid('sample'),
+      name: `样例 ${state.samples.length + 1}`,
+      text: '',
+      mode: 'text',
+    };
     setState((prev) => ({ ...prev, samples: [...prev.samples, s], currentSampleId: s.id }));
     setEditing(true);
     setDraftText('');
+  };
+
+  const setSampleMode = (m: SampleMode) => {
+    if (!sample || sample.mode === m) return;
+    setState((s) => ({
+      ...s,
+      samples: s.samples.map((x) => (x.id === sample.id ? { ...x, mode: m } : x)),
+    }));
   };
 
   const renameSample = () => {
@@ -169,8 +214,13 @@ export default function App() {
   };
 
   const copyOutput = async () => {
+    const output = mode === 'json' ? (jsonAnalysis?.parseError ? '' : jsonAnalysis?.output ?? '') : analysis.output;
+    if (!output) {
+      showToast('当前没有可复制的脱敏结果');
+      return;
+    }
     try {
-      await navigator.clipboard.writeText(analysis.output);
+      await navigator.clipboard.writeText(output);
       showToast('脱敏结果已复制到剪贴板');
     } catch {
       showToast('复制失败，请手动选择文本复制');
@@ -185,7 +235,12 @@ export default function App() {
     showToast('已恢复默认内容');
   };
 
-  const uncoveredCount = analysis.coverage.length;
+  const uncoveredCount =
+    mode === 'json' && jsonAnalysis
+      ? jsonAnalysis.parseError
+        ? 0
+        : jsonAnalysis.coverage.length
+      : analysis.coverage.length;
 
   return (
     <>
@@ -224,7 +279,7 @@ export default function App() {
         <section className="panel">
           <RulePanel
             rules={state.rules}
-            analysis={analysis}
+            analysis={rulePanelAnalysis}
             onAdd={addRule}
             onUpdate={updateRule}
             onDelete={deleteRule}
@@ -247,6 +302,20 @@ export default function App() {
                   </option>
                 ))}
               </select>
+              <div className="mode-switch" title="样例解析模式">
+                <button
+                  className={`mode-btn ${mode === 'text' ? 'active' : ''}`}
+                  onClick={() => setSampleMode('text')}
+                >
+                  纯文本
+                </button>
+                <button
+                  className={`mode-btn ${mode === 'json' ? 'active' : ''}`}
+                  onClick={() => setSampleMode('json')}
+                >
+                  JSON 结构化
+                </button>
+              </div>
               <button className="btn" onClick={renameSample} disabled={!sample}>
                 重命名
               </button>
@@ -291,7 +360,9 @@ export default function App() {
               <div className="empty">没有任何样例，请新建一个。</div>
             ) : tab === 'diff' ? (
               <DiffView
+                mode={mode}
                 analysis={analysis}
+                json={jsonAnalysis}
                 sample={sample}
                 editing={editing}
                 draftText={draftText}
@@ -309,7 +380,9 @@ export default function App() {
               />
             ) : tab === 'explain' ? (
               <ExplainPanel
+                mode={mode}
                 analysis={analysis}
+                json={jsonAnalysis}
                 rules={state.rules}
                 text={text}
                 activeKey={activeKey}
@@ -321,7 +394,9 @@ export default function App() {
               />
             ) : (
               <CoveragePanel
+                mode={mode}
                 analysis={analysis}
+                json={jsonAnalysis}
                 text={text}
                 activeKey={activeKey}
                 onSelect={(key) => {

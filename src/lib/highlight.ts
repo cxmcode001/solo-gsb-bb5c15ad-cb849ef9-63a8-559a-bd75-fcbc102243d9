@@ -16,6 +16,8 @@ export interface Piece {
 interface Range {
   start: number;
   end: number;
+  /** JSON 模式下所属字段的 JSON Pointer，用于跨字段区分同一局部坐标 */
+  pointer?: string;
 }
 
 /** 在 [baseStart, baseEnd) 内用 ranges 做不重叠切分（同一层 ranges 已互不相交） */
@@ -53,7 +55,8 @@ function emptyPiece(start: number, end: number): Piece {
   };
 }
 
-export const coverageRangeKey = (r: Range) => `cov-${r.start}-${r.end}`;
+export const coverageRangeKey = (r: Range) =>
+  r.pointer ? `cov-${r.pointer}-${r.start}-${r.end}` : `cov-${r.start}-${r.end}`;
 
 /**
  * 原文分片：采用命中与舍弃命中都基于原始坐标叠加。

@@ -10,7 +10,6 @@ import type {
 
 let hitSeq = 0;
 const nextHitId = () => `hit-${++hitSeq}`;
-
 /** 规范化标志：强制 g，去重，过滤非法字符 */
 export function normalizeFlags(flags: string): string {
   const allowed = new Set(['g', 'i', 'm', 's', 'u', 'y']);
@@ -76,9 +75,13 @@ function buildRegExp(rule: Rule): RegExp {
 }
 
 /** 收集一条规则的全部命中（零宽命中保留，便于解释） */
-function collectMatches(rule: Rule, priority: number, text: string): RawMatch[] {
+function collectCompiledMatches(
+  rule: Rule,
+  priority: number,
+  re: RegExp,
+  text: string,
+): RawMatch[] {
   const result: RawMatch[] = [];
-  const re = buildRegExp(rule);
   if (rule.scope === 'line') {
     // 逐行执行：^ $ 锚定单行，命中不跨行
     let lineStart = 0;
@@ -98,8 +101,10 @@ function collectMatches(rule: Rule, priority: number, text: string): RawMatch[] 
       lineStart += line.length + 1;
     }
   } else {
+    // 每段文本使用独立的 RegExp 实例，避免 lastIndex 在字段间串扰
+    const ownRe = new RegExp(re.source, re.flags);
     let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
+    while ((m = ownRe.exec(text)) !== null) {
       result.push({
         rule,
         priority,
@@ -107,7 +112,7 @@ function collectMatches(rule: Rule, priority: number, text: string): RawMatch[] 
         end: m.index + m[0].length,
         match: m,
       });
-      if (m[0] === '') re.lastIndex++;
+      if (m[0] === '') ownRe.lastIndex++;
     }
   }
   return result;
@@ -276,26 +281,59 @@ function detectCandidates(text: string): CoverageItem[] {
  * 主入口：对原文执行全部启用规则，产出裁决后的命中、一次性替换结果与未覆盖提示。
  */
 export function analyze(text: string, rules: Rule[]): Analysis {
-  hitSeq = 0;
-  const errors: RuleError[] = [];
-  const enabled = rules
-    .map((rule, i) => ({ rule, priority: i + 1 }))
-    .filter(({ rule }) => rule.enabled);
+  const { compiled, errors } = compileRules(rules);
+  return runAnalysis(text, compiled, errors);
+}
 
-  const raw: RawMatch[] = [];
-  for (const { rule, priority } of enabled) {
+/** 编译后的启用规则：正则只构造一次，语法错误只记录一次 */
+export interface CompiledRule {
+  rule: Rule;
+  /** 规则列表序号（从 1 开始），数值越小优先级越高 */
+  priority: number;
+  re: RegExp;
+}
+
+/**
+ * 编译启用规则：按列表顺序分配优先级；
+ * 空 pattern 或正则构造失败的规则被跳过并记录一条错误。
+ */
+export function compileRules(rules: Rule[]): {
+  compiled: CompiledRule[];
+  errors: RuleError[];
+} {
+  const compiled: CompiledRule[] = [];
+  const errors: RuleError[] = [];
+  rules.forEach((rule, i) => {
+    if (!rule.enabled) return;
     if (!rule.pattern) {
       errors.push({ ruleId: rule.id, message: '正则表达式不能为空' });
-      continue;
+      return;
     }
     try {
-      raw.push(...collectMatches(rule, priority, text));
+      compiled.push({ rule, priority: i + 1, re: buildRegExp(rule) });
     } catch (err) {
       errors.push({
         ruleId: rule.id,
         message: err instanceof Error ? err.message : String(err),
       });
     }
+  });
+  return { compiled, errors };
+}
+
+/**
+ * 在一段文本上执行全部已编译规则。
+ * 纯文本模式对整段文本执行一次；JSON 模式对每个字符串字段各执行一次，
+ * 命中区间都是「该字段值内的局部坐标」，字段之间天然不发生跨字段匹配。
+ */
+export function runAnalysis(
+  text: string,
+  compiled: CompiledRule[],
+  errors: RuleError[] = [],
+): Analysis {
+  const raw: RawMatch[] = [];
+  for (const { rule, priority, re } of compiled) {
+    raw.push(...collectCompiledMatches(rule, priority, re, text));
   }
 
   const hits = resolveHits(raw);

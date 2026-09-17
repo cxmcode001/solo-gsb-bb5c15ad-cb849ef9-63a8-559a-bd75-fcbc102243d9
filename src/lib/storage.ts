@@ -59,6 +59,7 @@ export function defaultSamples(): Sample[] {
     {
       id: uid('sample'),
       name: '客服工单（含重叠裁决演示）',
+      mode: 'text',
       text: `客户：张伟，身份证 110101199003071233，手机号 13800138000。
 备用手机 15912345678，邮箱 zhang.wei@company.com。
 联系方式：电话 18666668888 / 邮箱 zhangwei@gmail.com
@@ -68,7 +69,34 @@ export function defaultSamples(): Sample[] {
     },
     {
       id: uid('sample'),
+      name: '客户资料 JSON（结构化模式）',
+      mode: 'json',
+      text: `{
+  "customer": {
+    "name": "张伟",
+    "idCard": "110101199003071233",
+    "contacts": [
+      { "type": "手机", "value": "13800138000" },
+      { "type": "邮箱", "value": "zhang.wei@company.com" }
+    ],
+    "address": {
+      "city": "北京",
+      "detail": "朝阳区 联系方式：18666668888"
+    }
+  },
+  "meta": {
+    "level": 3,
+    "vip": true,
+    "note": null
+  },
+  "a/b~c": "键名中的 ~ 与 / 不参与匹配，邮箱 li.si@gmail.com 在值中会被脱敏",
+  "idCardType": "idCard 这个键名里的 110101199003071233 不会被扫描"
+}`,
+    },
+    {
+      id: uid('sample'),
       name: '空白样例',
+      mode: 'text',
       text: '',
     },
   ];
@@ -91,7 +119,8 @@ export function loadState(): PersistState {
     if (!Array.isArray(parsed.rules) || !Array.isArray(parsed.samples)) return defaultState();
     return {
       rules: parsed.rules,
-      samples: parsed.samples,
+      // 旧配置（无 mode 字段）一律视为纯文本；非法值回退为纯文本
+      samples: parsed.samples.map((s) => ({ ...s, mode: s.mode === 'json' ? 'json' : 'text' })),
       currentSampleId: parsed.currentSampleId ?? null,
     };
   } catch {
@@ -146,7 +175,11 @@ export function parseImport(text: string): PersistState | { error: string } {
   }
   return {
     rules: obj.rules as Rule[],
-    samples: obj.samples as Sample[],
+    // 旧文件缺少 mode：默认纯文本；仅接受明确的 'json'
+    samples: (obj.samples as Sample[]).map((s) => ({
+      ...s,
+      mode: s.mode === 'json' ? 'json' : 'text',
+    })),
     currentSampleId:
       typeof obj.currentSampleId === 'string' &&
       (obj.samples as Sample[]).some((s) => s.id === obj.currentSampleId)

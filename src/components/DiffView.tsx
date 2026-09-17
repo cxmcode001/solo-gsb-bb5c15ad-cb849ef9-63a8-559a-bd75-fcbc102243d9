@@ -1,10 +1,13 @@
 import { useEffect, useRef } from 'react';
-import type { Analysis, Sample } from '../types';
+import type { Analysis, JsonAnalysis, Sample, SampleMode } from '../types';
 import { buildOriginalPieces, buildResultPieces } from '../lib/highlight';
 import { PieceView } from './PieceView';
+import { JsonTreeView } from './JsonTreeView';
 
 interface DiffViewProps {
+  mode: SampleMode;
   analysis: Analysis;
+  json: JsonAnalysis | null;
   sample: Sample;
   editing: boolean;
   draftText: string;
@@ -20,6 +23,7 @@ interface DiffViewProps {
 
 export function DiffView(props: DiffViewProps) {
   const {
+    mode,
     analysis,
     sample,
     editing,
@@ -38,9 +42,13 @@ export function DiffView(props: DiffViewProps) {
   const resultRef = useRef<HTMLPreElement>(null);
 
   const text = sample.text;
-  const origPieces = buildOriginalPieces(text, analysis.hits, analysis.coverage);
-  const resultPieces = buildResultPieces(text, analysis.segments, analysis.hits, analysis.coverage);
-  const hitById = new Map(analysis.hits.map((h) => [h.id, h]));
+
+  // mode === 'json' 时 App 保证 jsonAnalysis 已计算完成
+  const json = props.json;
+
+  const hitById = new Map(
+    (mode === 'json' && json ? json.hits : analysis.hits).map((h) => [h.id, h]),
+  );
 
   const viewProps = {
     hitById,
@@ -49,6 +57,19 @@ export function DiffView(props: DiffViewProps) {
     onSelect,
     onHover,
   };
+
+  const origPieces = buildOriginalPieces(text, analysis.hits, analysis.coverage);
+  const resultPieces = buildResultPieces(
+    text,
+    analysis.segments,
+    analysis.hits,
+    analysis.coverage,
+  );
+
+  const stats = mode === 'json' && json ? json.stats : analysis.stats;
+  const parseError = mode === 'json' ? json?.parseError ?? null : null;
+  // 非解析失败的 JSON 分支里使用：此时 json 必然存在
+  const jsonView = mode === 'json' && json && !json.parseError ? json : null;
 
   // 选中某条命中 / 未覆盖项时，联动滚动两栏到对应位置
   useEffect(() => {
@@ -65,7 +86,7 @@ export function DiffView(props: DiffViewProps) {
     <div className="diff-grid">
       <div className="diff-pane">
         <div className="diff-pane-head">
-          <span>📄 原文</span>
+          <span>📄 原文{mode === 'json' ? '（JSON 结构化：键名/数字/布尔/null 原样保留）' : ''}</span>
           <span className="spacer" />
           {!editing ? (
             <button className="btn" onClick={() => onDraftText(text)}>
@@ -92,10 +113,23 @@ export function DiffView(props: DiffViewProps) {
               autoFocus
             />
           </div>
+        ) : parseError ? (
+          <div className="diff-scroll" style={{ padding: 12 }}>
+            <pre className="mono json-error-source">{text}</pre>
+          </div>
         ) : (
           <div className="diff-scroll">
             <pre className="diff-text" ref={origRef}>
-              <PieceView pieces={origPieces} {...viewProps} />
+              {jsonView ? (
+                <JsonTreeView
+                  variant="original"
+                  tree={jsonView.data}
+                  fields={jsonView.fields}
+                  {...viewProps}
+                />
+              ) : (
+                <PieceView pieces={origPieces} {...viewProps} />
+              )}
             </pre>
           </div>
         )}
@@ -103,18 +137,45 @@ export function DiffView(props: DiffViewProps) {
 
       <div className="diff-pane">
         <div className="diff-pane-head">
-          <span>🛡️ 脱敏结果（一次性替换，生成物不再参与匹配）</span>
+          <span>
+            🛡️ 脱敏结果
+            {mode === 'json'
+              ? '（仅字符串值参与匹配，禁止跨字段）'
+              : '（一次性替换，生成物不再参与匹配）'}
+          </span>
           <span className="spacer" />
           <span className="stat-line">
-            采用 <b className="ok">{analysis.stats.adopted}</b> · 舍弃{' '}
-            <b className="skip">{analysis.stats.rejected}</b>
+            采用 <b className="ok">{stats.adopted}</b> · 舍弃{' '}
+            <b className="skip">{stats.rejected}</b>
           </span>
         </div>
-        <div className="diff-scroll">
-          <pre className="diff-text" ref={resultRef}>
-            <PieceView pieces={resultPieces} {...viewProps} />
-          </pre>
-        </div>
+        {parseError ? (
+          <div className="diff-scroll" style={{ padding: 12 }}>
+            <div className="json-parse-error">
+              <div className="json-parse-error-title">❌ JSON 解析失败，未生成脱敏结果</div>
+              <div className="json-parse-error-pos">
+                第 <b>{parseError.line}</b> 行第 <b>{parseError.col}</b> 列
+                （字符偏移 {parseError.pos}）
+              </div>
+              <pre className="json-parse-error-msg">{parseError.message}</pre>
+            </div>
+          </div>
+        ) : (
+          <div className="diff-scroll">
+            <pre className="diff-text" ref={resultRef}>
+              {jsonView ? (
+                <JsonTreeView
+                  variant="masked"
+                  tree={jsonView.masked}
+                  fields={jsonView.fields}
+                  {...viewProps}
+                />
+              ) : (
+                <PieceView pieces={resultPieces} {...viewProps} />
+              )}
+            </pre>
+          </div>
+        )}
       </div>
     </div>
   );
