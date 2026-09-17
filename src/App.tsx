@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { PersistState, Rule, Sample } from './types';
-import { analyze } from './lib/engine';
+import type { Hit, PersistState, Rule, RuleError, Sample, SampleMode, SampleAnalysis } from './types';
+import { analyze, analyzeJson } from './lib/engine';
 import {
   defaultState,
   exportJson,
@@ -11,12 +11,22 @@ import {
 } from './lib/storage';
 import { RulePanel } from './components/RulePanel';
 import { DiffView } from './components/DiffView';
+import { JsonDiffView } from './components/JsonDiffView';
 import { ExplainPanel } from './components/ExplainPanel';
+import { JsonExplainPanel } from './components/JsonExplainPanel';
 import { CoveragePanel } from './components/CoveragePanel';
+import { JsonCoveragePanel } from './components/JsonCoveragePanel';
 
 type Tab = 'diff' | 'explain' | 'coverage';
 
 const RULE_COLORS = ['#2563eb', '#059669', '#d97706', '#dc2626', '#7c3aed', '#0891b2'];
+
+/** JSON 模式下跨字段汇总命中与错误（规则面板只看总数） */
+function flattenJson(ja: ReturnType<typeof analyzeJson>): { hits: Hit[]; errors: RuleError[] } {
+  const hits: Hit[] = [];
+  for (const f of ja.fields) hits.push(...f.analysis.hits);
+  return { hits, errors: ja.errors };
+}
 
 export default function App() {
   const [state, setState] = useState<PersistState>(() => loadState());
@@ -45,13 +55,26 @@ export default function App() {
     state.samples.find((s) => s.id === state.currentSampleId) ?? state.samples[0];
 
   const text = sample?.text ?? '';
-  const analysis = useMemo(() => analyze(text, state.rules), [text, state.rules]);
+  const mode: SampleMode = sample?.mode ?? 'text';
+
+  const analysis: SampleAnalysis = useMemo(() => {
+    if (mode === 'json') return analyzeJson(text, state.rules);
+    return { ...analyze(text, state.rules), mode: 'text' as const };
+  }, [text, state.rules, mode]);
+
+  const isJson = analysis.mode === 'json';
+  const parseError = isJson ? analysis.parseError : null;
+
+  const allHits: Hit[] = isJson ? flattenJson(analysis).hits : analysis.hits;
+  const allErrors: RuleError[] = analysis.errors;
+  const output = isJson ? analysis.output ?? '' : analysis.output;
+  const { coverage: coverageItems, stats } = analysis;
 
   // 文本或规则变化后，原有选中项可能失效
   useEffect(() => {
     setActiveKey(null);
     setHoveredKey(null);
-  }, [state.currentSampleId, text, state.rules]);
+  }, [state.currentSampleId, text, state.rules, mode]);
 
   /* ------------------------------ 规则操作 ------------------------------ */
 
@@ -101,10 +124,24 @@ export default function App() {
   };
 
   const addSample = () => {
-    const s: Sample = { id: uid('sample'), name: `样例 ${state.samples.length + 1}`, text: '' };
+    const s: Sample = {
+      id: uid('sample'),
+      name: `样例 ${state.samples.length + 1}`,
+      text: '',
+      mode: 'text',
+    };
     setState((prev) => ({ ...prev, samples: [...prev.samples, s], currentSampleId: s.id }));
     setEditing(true);
     setDraftText('');
+  };
+
+  const setSampleMode = (next: SampleMode) => {
+    if (!sample || sample.mode === next) return;
+    setEditing(false);
+    setState((s) => ({
+      ...s,
+      samples: s.samples.map((x) => (x.id === sample.id ? { ...x, mode: next } : x)),
+    }));
   };
 
   const renameSample = () => {
@@ -169,8 +206,12 @@ export default function App() {
   };
 
   const copyOutput = async () => {
+    if (parseError) {
+      showToast('JSON 解析失败，没有可复制的脱敏结果');
+      return;
+    }
     try {
-      await navigator.clipboard.writeText(analysis.output);
+      await navigator.clipboard.writeText(output);
       showToast('脱敏结果已复制到剪贴板');
     } catch {
       showToast('复制失败，请手动选择文本复制');
@@ -185,7 +226,24 @@ export default function App() {
     showToast('已恢复默认内容');
   };
 
-  const uncoveredCount = analysis.coverage.length;
+  const uncoveredCount = coverageItems.length;
+
+  const viewCommon = {
+    sample: sample!,
+    editing,
+    draftText,
+    onDraftText: (v: string) => {
+      setDraftText(v);
+      if (!editing) setEditing(true);
+    },
+    onCommitText: commitText,
+    onCancelEdit: () => setEditing(false),
+    activeKey,
+    hoveredKey,
+    onSelect: selectKey,
+    onHover: setHoveredKey,
+    focusNonce,
+  };
 
   return (
     <>
@@ -193,7 +251,7 @@ export default function App() {
         <h1>🔐 本地批量脱敏规则验证台</h1>
         <span className="spacer" />
         <div className="toolbar">
-          <button className="btn" onClick={copyOutput}>
+          <button className="btn" onClick={copyOutput} disabled={!!parseError}>
             复制脱敏结果
           </button>
           <button className="btn" onClick={() => exportJson(state)}>
@@ -224,7 +282,8 @@ export default function App() {
         <section className="panel">
           <RulePanel
             rules={state.rules}
-            analysis={analysis}
+            hits={allHits}
+            errors={allErrors}
             onAdd={addRule}
             onUpdate={updateRule}
             onDelete={deleteRule}
@@ -247,6 +306,20 @@ export default function App() {
                   </option>
                 ))}
               </select>
+              <div className="mode-switch" title="解析模式（随样例保存）">
+                <button
+                  className={mode === 'text' ? 'active' : ''}
+                  onClick={() => setSampleMode('text')}
+                >
+                  纯文本
+                </button>
+                <button
+                  className={mode === 'json' ? 'active' : ''}
+                  onClick={() => setSampleMode('json')}
+                >
+                  JSON 结构化
+                </button>
+              </div>
               <button className="btn" onClick={renameSample} disabled={!sample}>
                 重命名
               </button>
@@ -272,7 +345,7 @@ export default function App() {
                 className={`tab ${tab === 'explain' ? 'active' : ''}`}
                 onClick={() => setTab('explain')}
               >
-                命中解释<span className="badge">{analysis.stats.total}</span>
+                命中解释<span className="badge">{stats.total}</span>
               </button>
               <button
                 className={`tab ${tab === 'coverage' ? 'active' : ''}`}
@@ -286,38 +359,66 @@ export default function App() {
             </div>
           </div>
 
-          <div className="panel-body" style={{ padding: tab === 'diff' ? 12 : '12px 14px' }}>
+          {parseError && (
+            <div className="json-error-banner">
+              ⛔ JSON 解析失败：{parseError.message}（第 {parseError.line} 行第 {parseError.col} 列），未生成脱敏结果
+            </div>
+          )}
+
+          <div
+            className="panel-body"
+            style={{ padding: tab === 'diff' ? 12 : '12px 14px' }}
+          >
             {!sample ? (
               <div className="empty">没有任何样例，请新建一个。</div>
             ) : tab === 'diff' ? (
-              <DiffView
-                analysis={analysis}
-                sample={sample}
-                editing={editing}
-                draftText={draftText}
-                onDraftText={(v) => {
-                  setDraftText(v);
-                  if (!editing) setEditing(true);
-                }}
-                onCommitText={commitText}
-                onCancelEdit={() => setEditing(false)}
-                activeKey={activeKey}
-                hoveredKey={hoveredKey}
-                onSelect={selectKey}
-                onHover={setHoveredKey}
-                focusNonce={focusNonce}
-              />
+              isJson ? (
+                <JsonDiffView analysis={analysis} {...viewCommon} />
+              ) : (
+                <DiffView
+                  analysis={analysis}
+                  {...viewCommon}
+                />
+              )
             ) : tab === 'explain' ? (
-              <ExplainPanel
+              isJson ? (
+                parseError ? (
+                  <ParseErrorHint parseError={parseError} />
+                ) : (
+                  <JsonExplainPanel
+                    analysis={analysis}
+                    rules={state.rules}
+                    activeKey={activeKey}
+                    onSelect={(key) => {
+                      selectKey(key);
+                      setTab('diff');
+                    }}
+                    onHover={setHoveredKey}
+                  />
+                )
+              ) : (
+                <ExplainPanel
+                  analysis={analysis}
+                  rules={state.rules}
+                  text={text}
+                  activeKey={activeKey}
+                  onSelect={(key) => {
+                    selectKey(key);
+                    setTab('diff');
+                  }}
+                  onHover={setHoveredKey}
+                />
+              )
+            ) : parseError ? (
+              <ParseErrorHint parseError={parseError} />
+            ) : isJson ? (
+              <JsonCoveragePanel
                 analysis={analysis}
-                rules={state.rules}
-                text={text}
                 activeKey={activeKey}
                 onSelect={(key) => {
                   selectKey(key);
                   setTab('diff');
                 }}
-                onHover={setHoveredKey}
               />
             ) : (
               <CoveragePanel
@@ -336,5 +437,24 @@ export default function App() {
 
       {toast && <div className="toast">{toast}</div>}
     </>
+  );
+}
+
+function ParseErrorHint({
+  parseError,
+}: {
+  parseError: { message: string; line: number; col: number };
+}) {
+  return (
+    <div className="json-error-pane" style={{ minHeight: 160 }}>
+      <div className="json-error-card">
+        <div className="json-error-title">⛔ JSON 解析失败</div>
+        <div className="json-error-msg">{parseError.message}</div>
+        <div className="json-error-pos">
+          第 <b>{parseError.line}</b> 行，第 <b>{parseError.col}</b> 列
+        </div>
+        <div className="hint">请在「原文 / 结果对照」页修正原文；解析失败时不生成任何脱敏结果。</div>
+      </div>
+    </div>
   );
 }

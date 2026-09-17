@@ -1,5 +1,6 @@
 import type { Analysis, CoverageItem } from '../types';
 import { posToLineCol } from '../lib/highlight';
+import { textCoverageKey } from '../lib/engine';
 
 interface CoveragePanelProps {
   analysis: Analysis;
@@ -13,12 +14,6 @@ const KIND_NAME: Record<CoverageItem['kind'], string> = {
   phone: '手机号',
   idcard: '身份证',
 };
-
-/**
- * 未覆盖候选不在 analysis.hits 中，无法用 hitId 联动。
- * 这里按起始位置合成一个可用于高亮的标识。
- */
-export const coverageKey = (item: CoverageItem) => `cov-${item.start}-${item.end}`;
 
 export function CoveragePanel({ analysis, text, activeKey, onSelect }: CoveragePanelProps) {
   const items = analysis.coverage;
@@ -56,7 +51,7 @@ export function CoveragePanel({ analysis, text, activeKey, onSelect }: CoverageP
           </p>
           {items.map((item) => {
             const { line, col } = posToLineCol(text, item.start);
-            const key = coverageKey(item);
+            const key = textCoverageKey(item);
             return (
               <div
                 key={key}

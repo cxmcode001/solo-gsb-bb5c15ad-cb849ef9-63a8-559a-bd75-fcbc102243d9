@@ -2,6 +2,9 @@ import type {
   Analysis,
   CoverageItem,
   Hit,
+  JsonAnalysis,
+  JsonField,
+  JsonViewNode,
   Rule,
   RuleError,
   Segment,
@@ -118,6 +121,9 @@ function collectMatches(rule: Rule, priority: number, text: string): RawMatch[] 
  * 1) 全部规则先在“原文”上匹配（生成内容不会再被扫描）；
  * 2) 按 规则优先级（列表序号）→ 起始位置 → 结束位置 排序；
  * 3) 顺序领取字符区间，与已采用区间重叠者舍弃并给出解释。
+ *
+ * 注意：坐标完全相对于传入的 text；JSON 模式下对每个字符串值独立调用，
+ * 因此禁止跨字段匹配。
  */
 function resolveHits(raw: RawMatch[]): Hit[] {
   const sorted = [...raw].sort((a, b) => {
@@ -273,10 +279,10 @@ function detectCandidates(text: string): CoverageItem[] {
 }
 
 /**
- * 主入口：对原文执行全部启用规则，产出裁决后的命中、一次性替换结果与未覆盖提示。
+ * 对一段文本执行全部启用规则，产出裁决后的命中、一次性替换结果与未覆盖提示。
+ * 坐标均相对于传入的 text。
  */
-export function analyze(text: string, rules: Rule[]): Analysis {
-  hitSeq = 0;
+export function runAnalysis(text: string, rules: Rule[]): Analysis {
   const errors: RuleError[] = [];
   const enabled = rules
     .map((rule, i) => ({ rule, priority: i + 1 }))
@@ -321,5 +327,428 @@ export function analyze(text: string, rules: Rule[]): Analysis {
       adopted: adoptedCount,
       rejected: hits.length - adoptedCount,
     },
+  };
+}
+
+/**
+ * 纯文本模式主入口（语义保持不变）。
+ */
+export function analyze(text: string, rules: Rule[]): Analysis {
+  hitSeq = 0;
+  return runAnalysis(text, rules);
+}
+
+/* ============================ JSON 结构化模式 ============================ */
+
+/** RFC 6901 转义：先 ~ 后 / */
+export function escapeJsonPointerToken(token: string): string {
+  return token.replace(/~/g, '~0').replace(/\//g, '~1');
+}
+
+/**
+ * 带位置的 JSON 解析器（JSON.parse 的 reviver 拿不到行列，故手写递归下降）。
+ * 输出语法树，每个字符串值携带在原文中的 [start, end)（含两侧引号）。
+ */
+
+interface JsonNode {
+  type: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null';
+  start: number;
+  end: number;
+  /** string：解码后的 JS 字符串 */
+  value?: unknown;
+  /** object：键值对；array：子节点 */
+  members?: Array<{ key: JsonStringNode; value: JsonNode }>;
+  elements?: JsonNode[];
+}
+interface JsonStringNode extends JsonNode {
+  type: 'string';
+  value: string;
+  /** 开引号位置（值起始，用于行列定位） */
+  quoteStart: number;
+}
+
+class JsonSyntaxError extends Error {
+  pos: number;
+  constructor(message: string, pos: number) {
+    super(message);
+    this.name = 'JsonSyntaxError';
+    this.pos = pos;
+  }
+}
+
+class JsonParser {
+  private i = 0;
+
+  constructor(private readonly src: string) {}
+
+  parse(): JsonNode {
+    this.skipWs();
+    const node = this.parseValue();
+    this.skipWs();
+    if (this.i < this.src.length) {
+      throw new JsonSyntaxError(`意外的字符 ${JSON.stringify(this.src[this.i])}`, this.i);
+    }
+    return node;
+  }
+
+  private peek(): string {
+    return this.src[this.i];
+  }
+
+  private skipWs(): void {
+    while (this.i < this.src.length) {
+      const c = this.src.charCodeAt(this.i);
+      // space, tab, LF, CR
+      if (c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d) this.i++;
+      else break;
+    }
+  }
+
+  private expect(literal: string): void {
+    if (this.src.startsWith(literal, this.i)) {
+      this.i += literal.length;
+      return;
+    }
+    throw new JsonSyntaxError(`应为 "${literal}"`, this.i);
+  }
+
+  private parseValue(): JsonNode {
+    this.skipWs();
+    if (this.i >= this.src.length) throw new JsonSyntaxError('意外的输入结束', this.i);
+    const c = this.peek();
+    switch (c) {
+      case '{':
+        return this.parseObject();
+      case '[':
+        return this.parseArray();
+      case '"':
+        return this.parseString();
+      case 't':
+        return this.parseLiteral('true');
+      case 'f':
+        return this.parseLiteral('false');
+      case 'n':
+        return this.parseLiteral('null');
+      default:
+        if (c === '-' || (c >= '0' && c <= '9')) return this.parseNumber();
+        throw new JsonSyntaxError(`意外的字符 ${JSON.stringify(c)}`, this.i);
+    }
+  }
+
+  private parseLiteral(literal: string): JsonNode {
+    const start = this.i;
+    this.expect(literal);
+    return {
+      type: literal === 'true' || literal === 'false' ? 'boolean' : 'null',
+      start,
+      end: this.i,
+      value: literal === 'true',
+    };
+  }
+
+  private parseObject(): JsonNode {
+    const start = this.i;
+    this.i++; // {
+    const members: Array<{ key: JsonStringNode; value: JsonNode }> = [];
+    this.skipWs();
+    if (this.peek() === '}') {
+      this.i++;
+      return { type: 'object', start, end: this.i, members };
+    }
+    for (;;) {
+      this.skipWs();
+      if (this.peek() !== '"') throw new JsonSyntaxError('属性名必须是双引号字符串', this.i);
+      const key = this.parseString();
+      this.skipWs();
+      if (this.peek() !== ':') throw new JsonSyntaxError('属性名后应有 ":"', this.i);
+      this.i++;
+      const value = this.parseValue();
+      members.push({ key, value });
+      this.skipWs();
+      const c = this.peek();
+      if (c === ',') {
+        this.i++;
+        continue;
+      }
+      if (c === '}') {
+        this.i++;
+        break;
+      }
+      throw new JsonSyntaxError('应为 "," 或 "}"', this.i);
+    }
+    return { type: 'object', start, end: this.i, members };
+  }
+
+  private parseArray(): JsonNode {
+    const start = this.i;
+    this.i++; // [
+    const elements: JsonNode[] = [];
+    this.skipWs();
+    if (this.peek() === ']') {
+      this.i++;
+      return { type: 'array', start, end: this.i, elements };
+    }
+    for (;;) {
+      const value = this.parseValue();
+      elements.push(value);
+      this.skipWs();
+      const c = this.peek();
+      if (c === ',') {
+        this.i++;
+        continue;
+      }
+      if (c === ']') {
+        this.i++;
+        break;
+      }
+      throw new JsonSyntaxError('应为 "," 或 "]"', this.i);
+    }
+    return { type: 'array', start, end: this.i, elements };
+  }
+
+  private parseString(): JsonStringNode {
+    const start = this.i;
+    this.i++; // 开引号
+    let value = '';
+    for (;;) {
+      if (this.i >= this.src.length) throw new JsonSyntaxError('字符串未闭合', start);
+      const c = this.src[this.i];
+      if (c === '"') {
+        this.i++;
+        return { type: 'string', start, end: this.i, quoteStart: start, value };
+      }
+      if (c === '\\') {
+        value += this.parseEscape();
+        continue;
+      }
+      const code = this.src.charCodeAt(this.i);
+      if (code < 0x20) {
+        throw new JsonSyntaxError('字符串中存在未转义的控制字符', this.i);
+      }
+      value += c;
+      this.i++;
+    }
+  }
+
+  private parseEscape(): string {
+    this.i++; // 反斜杠
+    if (this.i >= this.src.length) throw new JsonSyntaxError('意外的输入结束', this.i);
+    const c = this.src[this.i++];
+    switch (c) {
+      case '"':
+        return '"';
+      case '\\':
+        return '\\';
+      case '/':
+        return '/';
+      case 'b':
+        return '\b';
+      case 'f':
+        return '\f';
+      case 'n':
+        return '\n';
+      case 'r':
+        return '\r';
+      case 't':
+        return '\t';
+      case 'u': {
+        const hex = this.src.slice(this.i, this.i + 4);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
+          throw new JsonSyntaxError('非法的 \\u 转义', this.i - 2);
+        }
+        this.i += 4;
+        return String.fromCharCode(parseInt(hex, 16));
+      }
+      default:
+        throw new JsonSyntaxError(`非法的转义字符 ${JSON.stringify(c)}`, this.i - 1);
+    }
+  }
+
+  private parseNumber(): JsonNode {
+    const start = this.i;
+    if (this.peek() === '-') this.i++;
+    const readDigits = () => {
+      const from = this.i;
+      while (this.i < this.src.length && this.src[this.i] >= '0' && this.src[this.i] <= '9') this.i++;
+      if (this.i === from) throw new JsonSyntaxError('数字中缺少数位', this.i);
+    };
+    if (this.peek() === '0') {
+      this.i++;
+    } else {
+      readDigits();
+    }
+    if (this.peek() === '.') {
+      this.i++;
+      readDigits();
+    }
+    if (this.peek() === 'e' || this.peek() === 'E') {
+      this.i++;
+      if (this.peek() === '+' || this.peek() === '-') this.i++;
+      readDigits();
+    }
+    const raw = this.src.slice(start, this.i);
+    return { type: 'number', start, end: this.i, value: Number(raw) };
+  }
+}
+
+/** 字符偏移 -> 1 起始的行/列 */
+function posToLineCol(src: string, pos: number): { line: number; col: number } {
+  let line = 1;
+  for (let k = 0; k < pos && k < src.length; k++) {
+    if (src[k] === '\n') line++;
+  }
+  const lastNl = src.lastIndexOf('\n', Math.max(0, pos - 1));
+  const col = pos - lastNl; // lastNl === -1 时 col = pos + 1
+  return { line, col };
+}
+
+/** 纯文本模式下未覆盖候选的联动 key（坐标即原文偏移） */
+export const textCoverageKey = (item: CoverageItem): string =>
+  item.covKey ?? `cov-${item.start}-${item.end}`;
+
+/**
+ * JSON 结构化模式：
+ * - 原文解析为 JSON；只对对象与数组中的字符串值（以及根字符串）分别运行规则；
+ * - 键名、数字、布尔、null 原样保留；
+ * - 每个值独立分析，禁止跨字段匹配，值内沿用当前优先级与重叠裁决；
+ * - 结果以格式化 JSON 展示，命中解释按 RFC 6901 Pointer 分组。
+ */
+export function analyzeJson(text: string, rules: Rule[]): JsonAnalysis {
+  hitSeq = 0;
+
+  const failed = (err: unknown, pos: number): JsonAnalysis => {
+    const { line, col } = posToLineCol(text, pos);
+    return {
+      mode: 'json',
+      parseError: {
+        message: err instanceof Error ? err.message : String(err),
+        line,
+        col,
+        pos,
+      },
+      fields: [],
+      tree: null,
+      output: null,
+      errors: [],
+      stats: { total: 0, adopted: 0, rejected: 0 },
+      coverage: [],
+    };
+  };
+
+  let root: JsonNode;
+  try {
+    root = new JsonParser(text).parse();
+  } catch (err) {
+    return failed(err, err instanceof JsonSyntaxError ? err.pos : 0);
+  }
+
+  // 深度优先遍历（对象按键序、数组按下标），为每个字符串值独立做一次分析。
+  // 键名只用于生成 Pointer，本身不参与匹配；number/boolean/null 原样保留。
+  const fields: JsonField[] = [];
+  const errors: RuleError[] = [];
+  const seenErrors = new Set<string>();
+  const coverage: CoverageItem[] = [];
+  let total = 0;
+  let adopted = 0;
+  let rejected = 0;
+  let fieldSeq = 0;
+
+  const analyzeStringNode = (node: JsonStringNode, pointer: string): JsonField => {
+    const fid = `jf-${fieldSeq++}`;
+    const { line, col } = posToLineCol(text, node.quoteStart);
+    const a = runAnalysis(node.value, rules);
+    for (const h of a.hits) h.pointer = pointer;
+    for (const c of a.coverage) {
+      c.pointer = pointer;
+      c.fid = fid;
+      // 同一字段下可能有多个候选；带上字段 id 与值内坐标后即可唯一
+      c.covKey = `${fid}-cov-${c.start}-${c.end}`;
+    }
+    for (const e of a.errors) {
+      const dedupeKey = `${e.ruleId}:${e.message}`;
+      if (!seenErrors.has(dedupeKey)) {
+        seenErrors.add(dedupeKey);
+        errors.push(e);
+      }
+    }
+    total += a.stats.total;
+    adopted += a.stats.adopted;
+    rejected += a.stats.rejected;
+    coverage.push(...a.coverage);
+    const field: JsonField = { fid, pointer, value: node.value, line, col, analysis: a };
+    fields.push(field);
+    return field;
+  };
+
+  // 同步构建界面渲染树
+  const buildView = (node: JsonNode, pointer: string, keyToken?: string): JsonViewNode => {
+    switch (node.type) {
+      case 'object': {
+        const children = (node.members ?? []).map((member) => {
+          const childPointer = `${pointer}/${escapeJsonPointerToken(member.key.value)}`;
+          return buildView(member.value, childPointer, text.slice(member.key.start, member.key.end));
+        });
+        return { kind: 'object', pointer, raw: '', keyToken, children };
+      }
+      case 'array': {
+        const children = (node.elements ?? []).map((el, idx) =>
+          buildView(el, `${pointer}/${idx}`),
+        );
+        return { kind: 'array', pointer, raw: '', keyToken, children };
+      }
+      case 'string': {
+        const strNode = node as JsonStringNode;
+        // 重复键（合法 JSON）会得到相同 Pointer，因此每个字符串节点独立分析、不做缓存
+        const field = analyzeStringNode(strNode, pointer);
+        return { kind: 'string', pointer, raw: '', keyToken, field };
+      }
+      case 'number':
+        return { kind: 'number', pointer, raw: text.slice(node.start, node.end), keyToken };
+      case 'boolean':
+        return { kind: 'boolean', pointer, raw: (node.value as boolean) ? 'true' : 'false', keyToken };
+      case 'null':
+        return { kind: 'null', pointer, raw: 'null', keyToken };
+    }
+  };
+
+  const tree = buildView(root, '');
+
+  // 用脱敏后的值替换字符串节点，其余节点使用原文切片，格式化输出（2 空格缩进）
+  const renderView = (vn: JsonViewNode, depth: number): string => {
+    const pad = '  '.repeat(depth + 1);
+    const closePad = '  '.repeat(depth);
+    switch (vn.kind) {
+      case 'string':
+        return JSON.stringify(vn.field?.analysis.output ?? '');
+      case 'number':
+      case 'boolean':
+      case 'null':
+        return vn.raw;
+      case 'object': {
+        const children = vn.children ?? [];
+        if (children.length === 0) return '{}';
+        const lines = children.map(
+          (child) => `${pad}${child.keyToken}: ${renderView(child, depth + 1)}`,
+        );
+        return `{\n${lines.join(',\n')}\n${closePad}}`;
+      }
+      case 'array': {
+        const children = vn.children ?? [];
+        if (children.length === 0) return '[]';
+        const lines = children.map((child) => `${pad}${renderView(child, depth + 1)}`);
+        return `[\n${lines.join(',\n')}\n${closePad}]`;
+      }
+    }
+  };
+
+  return {
+    mode: 'json',
+    parseError: null,
+    fields,
+    tree,
+    output: renderView(tree, 0),
+    errors,
+    stats: { total, adopted, rejected },
+    coverage,
   };
 }

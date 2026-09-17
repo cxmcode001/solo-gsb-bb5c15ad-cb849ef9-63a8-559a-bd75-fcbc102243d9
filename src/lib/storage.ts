@@ -1,4 +1,4 @@
-import type { PersistState, Rule, Sample } from '../types';
+import type { PersistState, Rule, Sample, SampleMode } from '../types';
 
 const STORAGE_KEY = 'mask-rule-bench:v1';
 
@@ -7,6 +7,20 @@ export function uid(prefix = 'id'): string {
     return `${prefix}-${crypto.randomUUID()}`;
   }
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+/** 规范化样例模式：旧配置中缺省或非法值一律按纯文本处理 */
+function normalizeMode(mode: unknown): SampleMode {
+  return mode === 'json' ? 'json' : 'text';
+}
+
+function normalizeSample(raw: unknown): Sample | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const s = raw as Partial<Sample>;
+  if (typeof s.id !== 'string' || typeof s.name !== 'string' || typeof s.text !== 'string') {
+    return null;
+  }
+  return { id: s.id, name: s.name, text: s.text, mode: normalizeMode(s.mode) };
 }
 
 export function defaultRules(): Rule[] {
@@ -59,6 +73,7 @@ export function defaultSamples(): Sample[] {
     {
       id: uid('sample'),
       name: '客服工单（含重叠裁决演示）',
+      mode: 'text',
       text: `客户：张伟，身份证 110101199003071233，手机号 13800138000。
 备用手机 15912345678，邮箱 zhang.wei@company.com。
 联系方式：电话 18666668888 / 邮箱 zhangwei@gmail.com
@@ -68,7 +83,30 @@ export function defaultSamples(): Sample[] {
     },
     {
       id: uid('sample'),
+      name: '用户档案 JSON（结构化模式演示）',
+      mode: 'json',
+      text: `{
+  "id": 1024,
+  "name": "张伟",
+  "active": true,
+  "remark": null,
+  "contact": {
+    "phone": "13800138000",
+    "email": "zhang.wei@company.com",
+    "idcard": "110101199003071233"
+  },
+  "logs": [
+    "备用手机 15912345678",
+    "旧邮箱 old.li@internal.io 未在域名白名单内",
+    "纯数字 19900001111 不会被手机号规则误判（号段过新）"
+  ],
+  "a/b~c": "该字段键名含 / 与 ~，Pointer 转义为 /a~1b~0c；电话 13800138000"
+}`,
+    },
+    {
+      id: uid('sample'),
       name: '空白样例',
+      mode: 'text',
       text: '',
     },
   ];
@@ -89,10 +127,16 @@ export function loadState(): PersistState {
     if (!raw) return defaultState();
     const parsed = JSON.parse(raw) as Partial<PersistState>;
     if (!Array.isArray(parsed.rules) || !Array.isArray(parsed.samples)) return defaultState();
+    const samples = parsed.samples
+      .map((s) => normalizeSample(s))
+      .filter((s): s is Sample => s !== null);
+    if (samples.length === 0) return defaultState();
     return {
-      rules: parsed.rules,
-      samples: parsed.samples,
-      currentSampleId: parsed.currentSampleId ?? null,
+      rules: parsed.rules as Rule[],
+      samples,
+      currentSampleId: samples.some((s) => s.id === parsed.currentSampleId)
+        ? parsed.currentSampleId ?? null
+        : samples[0].id,
     };
   } catch {
     return defaultState();
@@ -144,13 +188,19 @@ export function parseImport(text: string): PersistState | { error: string } {
       return { error: 'samples 中存在结构不完整的样例' };
     }
   }
+  const samples = obj.samples.map((s) => ({
+    id: s.id,
+    name: s.name,
+    text: s.text,
+    // 旧导出文件没有 mode 字段，默认纯文本
+    mode: normalizeMode((s as Partial<Sample>).mode),
+  }));
   return {
     rules: obj.rules as Rule[],
-    samples: obj.samples as Sample[],
+    samples,
     currentSampleId:
-      typeof obj.currentSampleId === 'string' &&
-      (obj.samples as Sample[]).some((s) => s.id === obj.currentSampleId)
+      typeof obj.currentSampleId === 'string' && samples.some((s) => s.id === obj.currentSampleId)
         ? obj.currentSampleId
-        : (obj.samples as Sample[])[0]?.id ?? null,
+        : samples[0]?.id ?? null,
   };
 }

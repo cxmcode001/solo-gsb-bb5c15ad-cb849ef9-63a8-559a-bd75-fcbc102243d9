@@ -55,7 +55,7 @@ export function DiffView(props: DiffViewProps) {
     if (!activeKey || focusNonce === 0) return;
     const scrollToMark = (container: HTMLElement | null) => {
       const sel = `mark[data-hit="${CSS.escape(activeKey)}"], mark[data-cov="${CSS.escape(activeKey)}"]`;
-      container?.querySelector(sel)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      container?.querySelector(sel)?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
     };
     scrollToMark(origRef.current);
     scrollToMark(resultRef.current);

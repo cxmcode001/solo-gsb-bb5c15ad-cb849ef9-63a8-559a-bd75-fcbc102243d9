@@ -308,6 +308,130 @@ textarea.sample-input {
   line-height: 1.55;
 }
 
+/* ---------- 模式切换（纯文本 / JSON 结构化） ---------- */
+.mode-switch {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.mode-switch button {
+  border: none;
+  background: #fff;
+  color: var(--muted);
+  padding: 4px 10px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.mode-switch button + button {
+  border-left: 1px solid var(--border);
+}
+.mode-switch button.active {
+  background: var(--primary);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* ---------- JSON 结构化视图 ---------- */
+pre.json-text {
+  white-space: pre;
+  word-break: normal;
+}
+.json-key {
+  color: #0f766e;
+}
+.json-string {
+  color: #b45309;
+}
+.json-number {
+  color: #2563eb;
+}
+.json-boolean {
+  color: #7c3aed;
+}
+.json-null {
+  color: var(--muted);
+  font-style: italic;
+}
+.json-pointer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  margin: 12px 0 8px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.json-pointer-head .json-pointer {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: #1e40af;
+  word-break: break-all;
+}
+.json-pointer-icon {
+  flex: none;
+}
+.json-pointer {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+pre.json-raw {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--muted);
+}
+
+/* JSON 解析错误 */
+.json-error-banner {
+  margin: 8px 12px 0;
+  padding: 7px 12px;
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+.json-error-pane {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 24px 12px;
+}
+.json-error-card {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  max-width: 520px;
+}
+.json-error-title {
+  font-weight: 600;
+  color: #991b1b;
+  margin-bottom: 8px;
+}
+.json-error-msg {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: #7f1d1d;
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+.json-error-pos {
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.json-error-pos b {
+  color: var(--danger);
+}
+
 /* ---------- Tab ---------- */
 .tabs {
   display: flex;

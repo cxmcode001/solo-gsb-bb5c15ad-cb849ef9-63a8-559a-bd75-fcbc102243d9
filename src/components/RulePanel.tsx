@@ -1,9 +1,10 @@
-import type { Analysis, Rule, RuleScope } from '../types';
+import type { Hit, Rule, RuleError, RuleScope } from '../types';
 import { normalizeFlags } from '../lib/engine';
 
 interface RulePanelProps {
   rules: Rule[];
-  analysis: Analysis;
+  hits: Hit[];
+  errors: RuleError[];
   onAdd: () => void;
   onUpdate: (id: string, patch: Partial<Rule>) => void;
   onDelete: (id: string) => void;
@@ -20,7 +21,7 @@ function validate(rule: Rule): string | null {
   }
 }
 
-export function RulePanel({ rules, analysis, onAdd, onUpdate, onDelete, onMove }: RulePanelProps) {
+export function RulePanel({ rules, hits, errors, onAdd, onUpdate, onDelete, onMove }: RulePanelProps) {
   return (
     <>
       <div className="panel-head">
@@ -36,8 +37,8 @@ export function RulePanel({ rules, analysis, onAdd, onUpdate, onDelete, onMove }
           {rules.length === 0 && <div className="empty">还没有规则，点击「新建规则」开始。</div>}
           {rules.map((rule, i) => {
             const err = validate(rule);
-            const engineErr = analysis.errors.find((e) => e.ruleId === rule.id);
-            const ruleHits = analysis.hits.filter((h) => h.ruleId === rule.id);
+            const engineErr = errors.find((e) => e.ruleId === rule.id);
+            const ruleHits = hits.filter((h) => h.ruleId === rule.id);
             const adopted = ruleHits.filter((h) => h.adopted).length;
             const rejected = ruleHits.length - adopted;
 
@@ -120,7 +121,7 @@ export function RulePanel({ rules, analysis, onAdd, onUpdate, onDelete, onMove }
                         value={rule.scope}
                         onChange={(e) => onUpdate(rule.id, { scope: e.target.value as RuleScope })}
                       >
-                        <option value="all">全文匹配</option>
+                        <option value="all">全文匹配（JSON 模式下=单个值整体）</option>
                         <option value="line">逐行匹配（^/$ 锚定单行）</option>
                       </select>
                     </label>
