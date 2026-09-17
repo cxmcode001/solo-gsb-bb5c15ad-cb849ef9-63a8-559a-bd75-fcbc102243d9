@@ -1,0 +1,8 @@
+services:
+  mask-rule-bench:
+    build: .
+    image: mask-rule-bench:latest
+    container_name: mask-rule-bench
+    ports:
+      - "8080:80"
+    restart: unless-stopped
